@@ -752,6 +752,18 @@ impl Consumer {
 		}
 	}
 
+	/// The object's ID as it arrived on the wire (moq-transport), or `None` for a frame
+	/// produced locally. It differs from the frame's position in the group when the
+	/// subgroup stream did not start at object 0 (draft-19 §11.4.2).
+	pub fn object_id(&self) -> Option<u64> {
+		self.fields.as_ref().map(|f| f.id)
+	}
+
+	/// The frame's timestamp, at the track's timescale.
+	pub fn timestamp(&self) -> Option<Timestamp> {
+		self.info.timestamp
+	}
+
 	/// Carry this frame across a front's route changes; see [`super::resume`].
 	pub(crate) fn with_recover(mut self, recover: super::resume::Recover, index: u64) -> Self {
 		self.recover = Some(Box::new((recover, index)));
