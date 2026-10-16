@@ -4129,7 +4129,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		slice: GroupSlice,
 	) -> Self {
 		if group.wire().is_none() {
-			group.skip_to(slice.skip);
+			// A local group may start past object 0 (`Producer::start_at`, a bonded leg
+			// that joined the group mid-way): serve it from its first frame, which
+			// `start_at` clamps to, rather than read below it and hit `Lagged`.
+			group.start_at(slice.skip);
 			group.end_at(slice.until.map_or(Bound::Unbounded, Bound::Excluded));
 		}
 		Self {

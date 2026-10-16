@@ -1887,7 +1887,15 @@ impl Producer {
 
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
-		self.insert(group, false)
+		self.insert(group, false, 0)
+	}
+
+	/// Create a new group that starts at frame `start` rather than 0 (see
+	/// [`group::Producer::start_at`]), before any reader can see it: a bonded leg that
+	/// joins a group mid-way. Starting it after [`Self::create_group`] races a reader
+	/// that is already positioned at frame 0, which then gets [`Error::Lagged`].
+	pub fn create_group_at(&self, group: group::Info, start: u64) -> Result<group::Producer> {
+		self.insert(group, false, start)
 	}
 
 	/// Create a group a session is receiving from a route, withheld from readers until
@@ -1899,7 +1907,7 @@ impl Producer {
 	/// that older group first.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn receive_group(&self, group: group::Info) -> Result<group::Producer> {
-		self.insert(group, true)
+		self.insert(group, true, 0)
 	}
 
 	/// Show a [`Self::receive_group`] group to readers: its first frame landed, or its
@@ -1911,7 +1919,7 @@ impl Producer {
 		}
 	}
 
-	fn insert(&self, group: group::Info, pending: bool) -> Result<group::Producer> {
+	fn insert(&self, group: group::Info, pending: bool, start: u64) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence()
 			&& group.sequence >= fin
@@ -1923,7 +1931,10 @@ impl Producer {
 		// An evicted sequence can be re-created; a live one is a duplicate.
 		state.claim_sequence(group.sequence, 0)?;
 
-		let group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
+		let mut group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
+		if start > 0 {
+			group.start_at(start)?;
+		}
 		state.cap(&group)?;
 		state.commit_group(&group, pending);
 
@@ -5198,6 +5209,38 @@ mod test {
 			.expect("datagram would have blocked")
 			.expect("would have errored")
 			.expect("track was closed")
+	}
+
+	/// A group a publisher starts past frame 0 after creating it is already visible: a
+	/// reader positioned at its head (as a subscription's stream is) stays below the start
+	/// it was given later, and gets `Lagged` instead of the group's frames.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_visible_group_started_late_strands_its_reader() {
+		let producer = track_producer("test", Info::default());
+		let mut subscriber = producer.subscribe(replay());
+		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut reading = subscriber.assert_group();
+		reading.start_at(0);
+		group.start_at(5).unwrap();
+		group.write_frame(None, bytes::Bytes::from_static(b"x")).unwrap();
+		assert!(matches!(reading.read_frame().now_or_never().unwrap(), Err(Error::Lagged)));
+	}
+
+	/// `create_group_at` starts the group before any reader sees it, so a reader positioned
+	/// at its head clamps to the start and gets the frames.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_group_created_at_a_start_is_read_from_it() {
+		let producer = track_producer("test", Info::default());
+		let mut subscriber = producer.subscribe(replay());
+		let mut group = producer.create_group_at(group::Info { sequence: 0 }, 5).unwrap();
+		let mut reading = subscriber.assert_group();
+		reading.start_at(0);
+		assert_eq!(reading.index(), 5);
+		group.write_frame(None, bytes::Bytes::from_static(b"x")).unwrap();
+		let frame = reading.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload, bytes::Bytes::from_static(b"x"));
 	}
 
 	#[test]
